@@ -1,0 +1,435 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getFirestore, 
+  doc, 
+  setDoc, 
+  onSnapshot, 
+  collection, 
+  query
+} from 'firebase/firestore';
+import { 
+  getAuth, 
+  signInAnonymously, 
+  onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  Trophy, 
+  Footprints, 
+  CheckCircle, 
+  ChevronLeft, 
+  ChevronRight,
+  X,
+  Save,
+  Calendar
+} from 'lucide-react';
+
+// Firebase 설정
+const firebaseConfig = {
+  apiKey: "AIzaSyCiBDdnZsAkos8fr8ZEl5EiBbvSi-yxAVM",
+  authDomain: "dattendance9.firebaseapp.com",
+  databaseURL: "https://dattendance9-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "dattendance9",
+  storageBucket: "dattendance9.firebasestorage.app",
+  messagingSenderId: "819241530008",
+  appId: "1:819241530008:web:4c890fd468044fff7a56ed"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const auth = getAuth(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'd-group-runner-2026';
+
+const MEMBERS = [
+  "강동현", "강동훈", "송채한", "김미화", "김재산", "김찬석", "김한나", "류지찬", 
+  "박성환", "박종봉", "소병득", "서정화", "신영섭", "안지훈", "오한천", "이승준", 
+  "이용구", "정덕수", "주효석", "서인수", "박창선", "김병식"
+].sort();
+
+const App = () => {
+  const [user, setUser] = useState(null);
+  const [selectedMember, setSelectedMember] = useState(null);
+  const [view, setView] = useState('home'); 
+  const [currentDate, setCurrentDate] = useState(new Date());
+  const [allData, setAllData] = useState({});
+  const [loading, setLoading] = useState(true);
+
+  // 커스텀 모달 상태
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingDate, setEditingDate] = useState(null);
+  const [tempDistance, setTempDistance] = useState('');
+  const [tempAttended, setTempAttended] = useState(false);
+
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        await signInAnonymously(auth);
+      } catch (error) {
+        console.error("Auth error", error);
+      }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    const q = query(collection(db, 'artifacts', appId, 'public', 'data', 'records'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const dataMap = {};
+      snapshot.forEach((doc) => {
+        dataMap[doc.id] = doc.data();
+      });
+      setAllData(dataMap);
+      setLoading(false);
+    }, (error) => {
+      console.error("Firestore error", error);
+    });
+    return () => unsubscribe();
+  }, [user]);
+
+  const isAttendanceDay = (date) => {
+    const day = date.getDay(); // 0: Sun, 3: Wed
+    const year = date.getFullYear();
+    const month = date.getMonth();
+    if (year !== 2026) return false;
+    if (month > 6) return false; 
+    return day === 0 || day === 3;
+  };
+
+  const openEditModal = (day) => {
+    const year = currentDate.getFullYear();
+    const month = currentDate.getMonth();
+    const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    const record = allData[`${selectedMember}_${dateStr}`] || { distance: 0, attended: false };
+    
+    setEditingDate({ day, dateStr, isAttendable: isAttendanceDay(new Date(year, month, day)) });
+    setTempDistance(record.distance || '');
+    setTempAttended(record.attended || false);
+    setIsModalOpen(true);
+  };
+
+  const handleSave = async () => {
+    if (!selectedMember || !editingDate) return;
+    
+    // 즉시 창 닫기
+    setIsModalOpen(false);
+
+    const { dateStr } = editingDate;
+    const docId = `${selectedMember}_${dateStr}`;
+    
+    const update = {
+      name: selectedMember,
+      date: dateStr,
+      distance: parseFloat(tempDistance) || 0,
+      attended: tempAttended,
+      updatedAt: new Date().toISOString()
+    };
+
+    try {
+      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'records', docId), update);
+      setEditingDate(null);
+    } catch (e) {
+      console.error("Save error", e);
+    }
+  };
+
+  const monthlyStats = useMemo(() => {
+    const stats = {};
+    const currentMonthStr = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}`;
+    
+    MEMBERS.forEach(m => { 
+      stats[m] = { name: m, totalDistance: 0, totalAttendance: 0 }; 
+    });
+
+    Object.values(allData).forEach(record => {
+      if (record.date && record.date.startsWith(currentMonthStr)) {
+        if (stats[record.name]) {
+          stats[record.name].totalDistance += Number(record.distance || 0);
+          if (record.attended === true) stats[record.name].totalAttendance += 1;
+        }
+      }
+    });
+    return Object.values(stats);
+  }, [allData, currentDate]);
+
+  const sortedByDist = useMemo(() => [...monthlyStats].sort((a, b) => b.totalDistance - a.totalDistance), [monthlyStats]);
+  const sortedByAttr = useMemo(() => [...monthlyStats].sort((a, b) => b.totalAttendance - a.totalAttendance), [monthlyStats]);
+  
+  const myMonthlyStats = monthlyStats.find(s => s.name === selectedMember) || { totalDistance: 0, totalAttendance: 0 };
+
+  const renderRankingCard = (title, icon, data, unit, colorClass, iconColor) => (
+    <div className="bg-white rounded-[2rem] border border-gray-100 shadow-sm overflow-hidden mb-6">
+      <div className="flex items-center gap-2 p-5 border-b border-gray-50 bg-gray-50/50">
+        {icon}
+        <h3 className="font-black text-xs text-gray-500 uppercase tracking-tight">{title}</h3>
+      </div>
+      <div className="divide-y divide-gray-50">
+        {data.slice(0, 5).map((stat, i) => (
+          <div key={stat.name} className={`flex items-center justify-between p-4 ${stat.name === selectedMember ? 'bg-blue-50/50' : ''}`}>
+            <div className="flex items-center gap-3">
+              <span className={`w-5 text-center font-black text-xs ${i === 0 ? 'text-amber-500' : i === 1 ? 'text-gray-400' : i === 2 ? 'text-orange-400' : 'text-gray-200'}`}>
+                {i + 1}
+              </span>
+              <span className={`font-bold text-sm ${stat.name === selectedMember ? 'text-blue-600' : 'text-gray-700'}`}>
+                {stat.name}
+              </span>
+            </div>
+            <div className={`font-black text-sm ${colorClass}`}>
+              {unit === 'km' ? stat.totalDistance.toFixed(1) : stat.totalAttendance}
+              <span className="text-[10px] ml-0.5 text-gray-300 font-normal uppercase">{unit}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  const renderHome = () => (
+    <div className="p-6 space-y-8 animate-in fade-in">
+      <div className="text-center space-y-1">
+        <h1 className="text-3xl font-black text-blue-600 tracking-tighter italic">D-GROUP</h1>
+        <p className="text-[10px] text-gray-400 font-bold uppercase tracking-[0.3em]">2026 Running Crew</p>
+      </div>
+
+      <div className="space-y-3">
+        <label className="text-[10px] font-black text-gray-400 uppercase ml-1 block text-center">Member Access</label>
+        <select 
+          className="w-full p-4 border-2 border-gray-100 rounded-3xl bg-gray-50 shadow-inner focus:border-blue-500 outline-none transition-all appearance-none font-bold text-gray-700 text-center text-sm"
+          onChange={(e) => { setSelectedMember(e.target.value); setView('calendar'); }}
+          value={selectedMember || ''}
+        >
+          <option value="" disabled>기록 입력 (이름 선택)</option>
+          {MEMBERS.map(m => <option key={m} value={m}>{m}</option>)}
+        </select>
+      </div>
+
+      <div className="space-y-4 pt-2">
+        <div className="flex items-center justify-between px-1">
+          <h2 className="font-black text-lg text-gray-800 italic">{currentDate.getMonth() + 1}월 실시간 랭킹</h2>
+          <span className="text-[10px] font-bold text-blue-500 bg-blue-50 px-2 py-1 rounded-lg uppercase">Live</span>
+        </div>
+
+        {renderRankingCard(
+          "거리별 TOP 5", 
+          <Footprints size={16} className="text-emerald-500" />, 
+          sortedByDist, 
+          "km", 
+          "text-emerald-600"
+        )}
+
+        {renderRankingCard(
+          "출석별 TOP 5", 
+          <CheckCircle size={16} className="text-blue-500" />, 
+          sortedByAttr, 
+          "회", 
+          "text-blue-600"
+        )}
+
+        <button 
+          onClick={() => setView('ranking')} 
+          className="w-full py-4 bg-gray-100 text-gray-500 rounded-3xl font-black text-xs uppercase tracking-widest active:scale-95 transition-transform"
+        >
+          전체 랭킹 상세보기
+        </button>
+      </div>
+    </div>
+  );
+
+  const renderCalendar = () => {
+    const year = currentDate.getFullYear();
+    const month = currentDate.getMonth();
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const firstDay = new Date(year, month, 1).getDay();
+    const today = new Date();
+    const isToday = (d) => today.getFullYear() === year && today.getMonth() === month && today.getDate() === d;
+    const days = [];
+    for (let i = 0; i < firstDay; i++) days.push(null);
+    for (let i = 1; i <= daysInMonth; i++) days.push(i);
+
+    return (
+      <div className="p-4 pb-20 space-y-4 animate-in slide-in-from-right">
+        <div className="flex items-center justify-between px-2">
+          <button onClick={() => { setSelectedMember(null); setView('home'); }} className="p-3 bg-gray-100 rounded-2xl active:scale-90"><ChevronLeft size={20}/></button>
+          <div className="text-center">
+            <h2 className="font-black text-xl text-gray-800">{selectedMember} 님</h2>
+            <p className="text-[10px] font-bold text-blue-500 uppercase tracking-widest">Training log</p>
+          </div>
+          <div className="w-12"></div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <div className="bg-white p-5 rounded-[2rem] border border-gray-100 shadow-sm text-center">
+            <div className="flex justify-center mb-2"><CheckCircle size={18} className="text-blue-500"/></div>
+            <div className="text-[10px] font-bold text-gray-400 uppercase mb-1">Monthly Attendance</div>
+            <div className="text-2xl font-black text-gray-800">{myMonthlyStats.totalAttendance}<span className="text-sm ml-1 text-gray-400 font-normal">회</span></div>
+          </div>
+          <div className="bg-white p-5 rounded-[2rem] border border-gray-100 shadow-sm text-center">
+            <div className="flex justify-center mb-2"><Footprints size={18} className="text-emerald-500"/></div>
+            <div className="text-[10px] font-bold text-gray-400 uppercase mb-1">Monthly Distance</div>
+            <div className="text-2xl font-black text-gray-800">{myMonthlyStats.totalDistance.toFixed(1)}<span className="text-sm ml-1 text-gray-400 font-normal">km</span></div>
+          </div>
+        </div>
+
+        <div className="bg-white rounded-[2.5rem] p-6 shadow-xl shadow-gray-100 border border-gray-50">
+          <div className="flex justify-between items-center mb-6">
+            <button onClick={() => setCurrentDate(new Date(year, month - 1))} className="p-2 active:scale-90"><ChevronLeft size={24} className="text-gray-300"/></button>
+            <span className="font-black text-2xl italic text-blue-600">{month + 1}월</span>
+            <button onClick={() => setCurrentDate(new Date(year, month + 1))} className="p-2 active:scale-90"><ChevronRight size={24} className="text-gray-300"/></button>
+          </div>
+          <div className="grid grid-cols-7 gap-1 text-center mb-4">
+            {['S','M','T','W','T','F','S'].map((d, i) => (
+              <span key={i} className={`text-[10px] font-black ${i === 0 ? 'text-red-400' : i === 6 ? 'text-blue-400' : 'text-gray-300'}`}>{d}</span>
+            ))}
+          </div>
+          <div className="grid grid-cols-7 gap-3">
+            {days.map((day, idx) => {
+              if (!day) return <div key={`empty-${idx}`} className="h-10"></div>;
+              const dateObj = new Date(year, month, day);
+              const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+              const record = allData[`${selectedMember}_${dateStr}`] || {};
+              const isAttendable = isAttendanceDay(dateObj);
+              const active = isToday(day);
+              return (
+                <button 
+                  key={day}
+                  onClick={() => openEditModal(day)}
+                  className={`relative h-11 flex flex-col items-center justify-center rounded-2xl transition-all active:scale-90 ${active ? 'bg-blue-600 text-white shadow-lg shadow-blue-200' : isAttendable ? 'bg-orange-50 text-orange-600 font-bold' : 'bg-gray-50 text-gray-400'}`}
+                >
+                  <span className="text-xs font-black">{day}</span>
+                  <div className="flex gap-0.5 mt-1">
+                    {record.attended && <div className={`w-1.5 h-1.5 rounded-full ${active ? 'bg-white' : 'bg-blue-500'}`}></div>}
+                    {record.distance > 0 && <div className={`w-1.5 h-1.5 rounded-full ${active ? 'bg-white opacity-50' : 'bg-emerald-500'}`}></div>}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const renderFullRanking = () => (
+    <div className="p-4 pb-20 space-y-8 animate-in slide-in-from-bottom">
+      <div className="flex items-center justify-between px-2">
+        <button onClick={() => setView('home')} className="p-3 bg-gray-100 rounded-2xl active:scale-90"><ChevronLeft size={20}/></button>
+        <h2 className="font-black text-xl text-gray-800 italic">{currentDate.getMonth() + 1}월 전체 랭킹</h2>
+        <div className="w-12"></div>
+      </div>
+      <div className="space-y-10">
+        <section>
+          <div className="flex items-center gap-2 mb-4 px-2">
+            <Footprints size={18} className="text-emerald-500" />
+            <h3 className="font-black text-sm text-gray-400 uppercase tracking-tighter">거리별 전체 순위</h3>
+          </div>
+          <div className="bg-white rounded-[2rem] border border-gray-100 overflow-hidden shadow-sm">
+            {sortedByDist.map((stat, i) => (
+              <div key={stat.name} className={`flex items-center justify-between p-5 border-b border-gray-50 last:border-0 ${stat.name === selectedMember ? 'bg-blue-50/50' : ''}`}>
+                <div className="flex items-center gap-4">
+                  <span className={`w-6 text-center font-black ${i === 0 ? 'text-amber-500 text-lg' : i === 1 ? 'text-gray-400' : i === 2 ? 'text-orange-400' : 'text-gray-200 text-sm'}`}>{i+1}</span>
+                  <span className={`font-bold ${stat.name === selectedMember ? 'text-blue-600' : 'text-gray-700'}`}>{stat.name}</span>
+                </div>
+                <div className="font-black text-emerald-600">{stat.totalDistance.toFixed(1)}<span className="text-[10px] ml-1 text-gray-300 uppercase">km</span></div>
+              </div>
+            ))}
+          </div>
+        </section>
+        <section>
+          <div className="flex items-center gap-2 mb-4 px-2">
+            <CheckCircle size={18} className="text-blue-500" />
+            <h3 className="font-black text-sm text-gray-400 uppercase tracking-tighter">출석별 전체 순위</h3>
+          </div>
+          <div className="bg-white rounded-[2rem] border border-gray-100 overflow-hidden shadow-sm">
+            {sortedByAttr.map((stat, i) => (
+              <div key={stat.name} className={`flex items-center justify-between p-5 border-b border-gray-50 last:border-0 ${stat.name === selectedMember ? 'bg-blue-50/50' : ''}`}>
+                <div className="flex items-center gap-4">
+                  <span className={`w-6 text-center font-black ${i === 0 ? 'text-blue-500 text-lg' : i === 1 ? 'text-gray-400' : i === 2 ? 'text-orange-400' : 'text-gray-200 text-sm'}`}>{i+1}</span>
+                  <span className={`font-bold ${stat.name === selectedMember ? 'text-blue-600' : 'text-gray-700'}`}>{stat.name}</span>
+                </div>
+                <div className="font-black text-blue-600">{stat.totalAttendance}<span className="text-[10px] ml-1 text-gray-300 uppercase">회</span></div>
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="max-w-md mx-auto min-h-screen bg-white text-gray-900 font-sans select-none relative overflow-x-hidden">
+      {loading ? (
+        <div className="flex flex-col items-center justify-center h-screen space-y-4">
+          <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+          <p className="text-[10px] font-black text-gray-300 uppercase tracking-[0.3em]">Syncing...</p>
+        </div>
+      ) : (
+        <>
+          {view === 'home' && renderHome()}
+          {view === 'calendar' && renderCalendar()}
+          {view === 'ranking' && renderFullRanking()}
+        </>
+      )}
+
+      {/* 커스텀 모달 입력창 */}
+      {isModalOpen && editingDate && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 backdrop-blur-sm p-4 animate-in fade-in">
+          <div className="w-full max-w-sm bg-white rounded-[2.5rem] p-8 space-y-8 animate-in slide-in-from-bottom duration-300 shadow-2xl">
+            <div className="flex justify-between items-center">
+              <div>
+                <h3 className="text-2xl font-black text-gray-800 italic">{editingDate.day}일 기록</h3>
+                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">{editingDate.dateStr}</p>
+              </div>
+              <button onClick={() => setIsModalOpen(false)} className="p-2 bg-gray-50 rounded-full text-gray-400 active:scale-90"><X size={20}/></button>
+            </div>
+
+            <div className="space-y-6">
+              <div className="space-y-3 text-center">
+                <label className="text-[10px] font-black text-gray-400 uppercase">러닝 거리 (km)</label>
+                <input 
+                  type="number" 
+                  step="0.1"
+                  inputMode="decimal"
+                  className="w-full p-5 bg-gray-50 border-2 border-transparent focus:border-blue-500 rounded-3xl outline-none font-black text-3xl text-blue-600 transition-all text-center"
+                  value={tempDistance}
+                  onChange={(e) => setTempDistance(e.target.value)}
+                  placeholder="0.0"
+                  autoFocus
+                />
+              </div>
+
+              {editingDate.isAttendable && (
+                <div className="flex items-center justify-between p-5 bg-orange-50 rounded-3xl border border-orange-100">
+                  <div className="flex items-center gap-3">
+                    <CheckCircle className="text-orange-500" size={20}/>
+                    <span className="font-bold text-orange-900">공식 출석 체크</span>
+                  </div>
+                  <button 
+                    onClick={() => setTempAttended(!tempAttended)}
+                    className={`w-14 h-8 rounded-full transition-all relative ${tempAttended ? 'bg-orange-500' : 'bg-gray-200'}`}
+                  >
+                    <div className={`absolute top-1 w-6 h-6 bg-white rounded-full transition-all ${tempAttended ? 'left-7' : 'left-1'}`}></div>
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <button 
+              onClick={handleSave}
+              className="w-full py-5 bg-blue-600 text-white rounded-[1.5rem] font-black shadow-xl shadow-blue-100 flex items-center justify-center gap-3 active:scale-95 transition-transform"
+            >
+              <Save size={20} /> 저장하고 닫기
+            </button>
+          </div>
+        </div>
+      )}
+      
+      <div className="fixed bottom-6 left-0 right-0 flex justify-center opacity-10 pointer-events-none z-0">
+        <span className="text-[10px] font-black tracking-[0.4em] text-gray-900 uppercase italic">D-GROUP 2026</span>
+      </div>
+    </div>
+  );
+};
+
+export default App;
